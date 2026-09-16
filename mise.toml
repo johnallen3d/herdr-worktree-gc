@@ -1,0 +1,20 @@
+min_version = "2025.1.0"
+
+[tools]
+rust = "1.93.0"
+
+[tasks.fmt]
+description = "Check Rust formatting"
+run = "cargo fmt --check"
+
+[tasks.clippy]
+description = "Run Clippy with pedantic lints"
+run = "cargo clippy --locked --all-targets -- -D warnings -W clippy::pedantic"
+
+[tasks.test]
+description = "Run the Rust test suite"
+run = "cargo test --locked"
+
+[tasks.check]
+description = "Run all required checks"
+depends = ["fmt", "clippy", "test"]

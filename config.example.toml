@@ -1,0 +1,9 @@
+# Event hooks report candidates unless this is explicitly enabled.
+auto_remove = false
+
+# Avoid repeated network work during bursts of workspace events.
+debounce_seconds = 300
+fetch_timeout_seconds = 60
+
+# Fail closed when process detection is unavailable.
+check_processes = true

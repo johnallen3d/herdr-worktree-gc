@@ -1,0 +1,33 @@
+id = "worktree-gc"
+name = "Worktree GC"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Safely removes linked worktrees after their upstream branch disappears"
+platforms = ["macos", "linux"]
+
+[[startup]]
+command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/worktree-gc\" event --trigger startup"]
+
+[[events]]
+on = "workspace.created"
+command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/worktree-gc\" event --trigger workspace.created"]
+
+[[events]]
+on = "workspace.focused"
+command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/worktree-gc\" event --trigger workspace.focused"]
+
+[[events]]
+on = "workspace.closed"
+command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/worktree-gc\" event --trigger workspace.closed"]
+
+[[actions]]
+id = "preview"
+title = "Worktree GC: preview"
+contexts = ["global", "workspace"]
+command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/worktree-gc\" run --dry-run --force-fetch --trigger preview"]
+
+[[actions]]
+id = "cleanup"
+title = "Worktree GC: clean up now"
+contexts = ["global", "workspace"]
+command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/worktree-gc\" run --remove --force-fetch --trigger cleanup"]
