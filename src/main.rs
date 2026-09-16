@@ -366,7 +366,7 @@ impl WorktreeGc<'_> {
         };
 
         let mut repo_hints = event_repo_hints(event_json);
-        let protected_paths = event_repo_hints(context_json);
+        let protected_paths = protected_context_paths(event_json, context_json);
         repo_hints.extend(protected_paths.iter().cloned());
         for pane in &panes {
             repo_hints.extend(
@@ -992,6 +992,18 @@ fn event_repo_hints(raw: &str) -> Vec<PathBuf> {
     hints
 }
 
+fn protected_context_paths(event_json: &str, context_json: &str) -> Vec<PathBuf> {
+    let is_workspace_closed = serde_json::from_str::<Value>(event_json).is_ok_and(|event| {
+        event.get("event").and_then(Value::as_str) == Some("workspace_closed")
+            || event.pointer("/data/type").and_then(Value::as_str) == Some("workspace_closed")
+    });
+    if is_workspace_closed {
+        Vec::new()
+    } else {
+        event_repo_hints(context_json)
+    }
+}
+
 fn processes_under(path: &Path, runner: &dyn Runner) -> Result<Vec<u32>, String> {
     let target = resolve_path(path);
     let proc = Path::new("/proc");
@@ -1325,6 +1337,22 @@ mod tests {
         assert_eq!(
             event_repo_hints(payload),
             vec![PathBuf::from("/repo"), PathBuf::from("/repo-feature")]
+        );
+    }
+
+    #[test]
+    fn closed_workspace_context_does_not_protect_stale_checkout() {
+        let context = r#"{"workspace_cwd":"/repo-feature"}"#;
+        assert_eq!(
+            protected_context_paths(r#"{"event":"workspace_focused"}"#, context),
+            vec![PathBuf::from("/repo-feature")]
+        );
+        assert!(
+            protected_context_paths(
+                r#"{"event":"workspace_closed","data":{"type":"workspace_closed"}}"#,
+                context
+            )
+            .is_empty()
         );
     }
 
