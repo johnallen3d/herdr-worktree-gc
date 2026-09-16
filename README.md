@@ -133,7 +133,11 @@ mise run package
 
 Pass an explicit Rust target when cross-compiling, for example `mise run package -- aarch64-unknown-linux-gnu`.
 
-Pushing a `v*` tag runs the release workflow, builds all four supported targets, and attaches the archives to a GitHub release.
+## Releases
+
+[release-plz](https://release-plz.dev/) manages versions, `CHANGELOG.md`, tags, and GitHub Releases from Conventional Commits. It runs in Git-only mode, and `publish = false` provides an additional guard against publishing to crates.io. Pushes to `main` that change Rust sources, Cargo manifests, or the plugin manifest update a release pull request when they contain a releasable `feat`, `fix`, `perf`, or `revert` commit. Documentation, tests, refactors, build changes, CI changes, and chores do not cut releases by themselves.
+
+Merging the release pull request creates the GitHub Release. The release workflow then builds all four supported targets and attaches their archives to that release. Do not create release tags manually.
 
 ## License
 

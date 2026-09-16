@@ -1,16 +1,57 @@
-name: Release binaries
+name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - Cargo.toml
+      - Cargo.lock
+      - herdr-plugin.toml
 
 permissions:
   contents: read
 
 jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      releases: ${{ steps.release.outputs.releases }}
+      releases_created: ${{ steps.release.outputs.releases_created }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@v3
+        with:
+          cache: true
+      - name: Run release-plz
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          output=$(mise exec -- release-plz release \
+            --git-token "$GITHUB_TOKEN" \
+            --repo-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --output json)
+          releases=$(printf '%s' "$output" | mise exec -- yq -p=json -o=json -I=0 '.releases')
+          printf 'releases=%s\n' "$releases" >> "$GITHUB_OUTPUT"
+          if [[ "$releases" == "[]" ]]; then
+            echo 'releases_created=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'releases_created=true' >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: release
+    if: needs.release.outputs.releases_created == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -26,6 +67,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJSON(needs.release.outputs.releases)[0].tag }}
       - uses: jdx/mise-action@v3
         with:
           cache: true
@@ -36,18 +79,83 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  release:
-    needs: build
+  publish-assets:
+    name: Publish release assets
+    needs:
+      - release
+      - build
+    if: needs.release.outputs.releases_created == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v3
+        with:
+          cache: true
       - uses: actions/download-artifact@v4
         with:
           pattern: worktree-gc-*
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - name: Upload archives to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ fromJSON(needs.release.outputs.releases)[0].tag }}
+        run: mise exec -- gh release upload "$RELEASE_TAG" dist/*.tar.gz --clobber
+
+  release-pr:
+    name: Prepare next release
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
         with:
-          files: dist/*.tar.gz
-          generate_release_notes: true
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: jdx/mise-action@v3
+        with:
+          cache: true
+      - name: Create or update release pull request
+        id: release-pr
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          output=$(mise exec -- release-plz release-pr \
+            --git-token "$GITHUB_TOKEN" \
+            --repo-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --output json)
+          prs=$(printf '%s' "$output" | mise exec -- yq -p=json -o=json -I=0 '.prs')
+          printf 'prs=%s\n' "$prs" >> "$GITHUB_OUTPUT"
+          if [[ "$prs" == "[]" ]]; then
+            echo 'prs_created=false' >> "$GITHUB_OUTPUT"
+            echo 'pr={}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'prs_created=true' >> "$GITHUB_OUTPUT"
+            pr=$(printf '%s' "$prs" | mise exec -- yq -p=json -o=json -I=0 '.[0]')
+            printf 'pr=%s\n' "$pr" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Synchronize plugin manifest version
+        if: steps.release-pr.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_DATA: ${{ steps.release-pr.outputs.pr }}
+        run: |
+          pr_number=$(printf '%s' "$PR_DATA" | mise exec -- yq -p=json -o=json -I=0 -r '.number')
+          version=$(printf '%s' "$PR_DATA" | mise exec -- yq -p=json -o=json -I=0 -r '.releases[0].version')
+          mise exec -- gh pr checkout "$pr_number"
+          mise run sync-plugin-version -- "$version"
+          if git diff --quiet -- herdr-plugin.toml; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add herdr-plugin.toml
+          git commit -m "chore: sync plugin manifest version"
+          git push

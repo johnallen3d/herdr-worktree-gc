@@ -1,7 +1,12 @@
 min_version = "2025.1.0"
 
 [tools]
+actionlint = "1.7.12"
+gh = "2.101.0"
+release-plz = "0.3.167"
 rust = { version = "1.93.0", profile = "minimal", components = ["rustfmt", "clippy"] }
+shellcheck = "0.11.0"
+yq = "4.53.6"
 
 [tasks.fmt]
 description = "Check Rust formatting"
@@ -54,6 +59,23 @@ tar -C dist -czf "$archive" "$name"
 printf '%s\n' "$archive"
 '''
 
+[tasks.workflow-lint]
+description = "Lint GitHub Actions workflows"
+run = "actionlint .github/workflows/*.yml"
+
+[tasks.sync-plugin-version]
+description = "Synchronize the Herdr plugin manifest version"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 || ! $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+  echo "usage: mise run sync-plugin-version -- VERSION" >&2
+  exit 2
+fi
+VERSION=$1 yq -i -p=toml -o=toml '.version = strenv(VERSION)' herdr-plugin.toml
+'''
+
 [tasks.check]
 description = "Run all required checks"
-depends = ["fmt", "clippy", "test"]
+depends = ["fmt", "clippy", "test", "workflow-lint"]
