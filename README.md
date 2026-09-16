@@ -50,11 +50,11 @@ Building from source requires [mise](https://mise.jdx.dev/), which installs the 
 
 ```sh
 mise install
-mise exec -- ./scripts/install-dev.sh
+mise run install-dev
 herdr plugin link "$PWD"
 ```
 
-Re-run the script after changing Rust code. Relink after changing `herdr-plugin.toml`:
+Re-run `mise run install-dev` after changing Rust code. Relink after changing `herdr-plugin.toml`:
 
 ```sh
 herdr plugin unlink worktree-gc
@@ -128,7 +128,13 @@ The Clippy task runs all targets with warnings denied and `clippy::pedantic` ena
 Build a release archive for an installed Rust target with:
 
 ```sh
-mise exec -- ./scripts/package.sh
+mise run package
 ```
 
+Pass an explicit Rust target when cross-compiling, for example `mise run package -- aarch64-unknown-linux-gnu`.
+
 Pushing a `v*` tag runs the release workflow, builds all four supported targets, and attaches the archives to a GitHub release.
+
+## License
+
+Licensed under the [MIT License](LICENSE).

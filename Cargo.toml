@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Conservative cleanup of Herdr-managed Git worktrees"
+license = "MIT"
 publish = false
 
 [lints.clippy]

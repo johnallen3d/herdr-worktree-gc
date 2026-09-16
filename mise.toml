@@ -15,6 +15,45 @@ run = "cargo clippy --locked --all-targets -- -D warnings -W clippy::pedantic"
 description = "Run the Rust test suite"
 run = "cargo test --locked"
 
+[tasks.install-dev]
+description = "Build and install the development binary"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+cargo build --release --locked
+mkdir -p bin
+install -m 755 target/release/worktree-gc bin/worktree-gc
+printf 'Installed development binary at %s/bin/worktree-gc\n' "$PWD"
+'''
+
+[tasks.package]
+description = "Build a release archive for a Rust target"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+case $# in
+  0) target=$(rustc -vV | sed -n 's/^host: //p') ;;
+  1) target=$1 ;;
+  *)
+    echo "usage: mise run package [rust-target]" >&2
+    exit 2
+    ;;
+esac
+name="worktree-gc-$target"
+stage="dist/$name"
+archive="dist/$name.tar.gz"
+
+cargo build --release --locked --target "$target"
+rm -rf "$stage"
+mkdir -p "$stage/bin"
+install -m 755 "target/$target/release/worktree-gc" "$stage/bin/worktree-gc"
+cp herdr-plugin.toml config.example.toml README.md LICENSE "$stage/"
+tar -C dist -czf "$archive" "$name"
+printf '%s\n' "$archive"
+'''
+
 [tasks.check]
 description = "Run all required checks"
 depends = ["fmt", "clippy", "test"]
