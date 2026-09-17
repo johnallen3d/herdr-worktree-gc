@@ -9,9 +9,19 @@ on:
       - Cargo.toml
       - Cargo.lock
       - herdr-plugin.toml
+  workflow_dispatch:
+    inputs:
+      recovery_tag:
+        description: Existing draft release tag to rebuild
+        required: false
+        type: string
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -21,8 +31,8 @@ jobs:
       contents: write
       pull-requests: read
     outputs:
-      releases: ${{ steps.release.outputs.releases }}
-      releases_created: ${{ steps.release.outputs.releases_created }}
+      release_pending: ${{ steps.release.outputs.release_pending }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,33 +41,56 @@ jobs:
       - uses: jdx/mise-action@v3
         with:
           cache: true
-      - name: Run release-plz
+      - name: Create or recover draft release
         id: release
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          RECOVERY_TAG: ${{ inputs.recovery_tag }}
         run: |
-          output=$(mise exec -- release-plz release \
-            --git-token "$GITHUB_TOKEN" \
-            --repo-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
-            --output json)
-          releases=$(printf '%s' "$output" | mise exec -- yq -p=json -o=json -I=0 '.releases')
-          printf 'releases=%s\n' "$releases" >> "$GITHUB_OUTPUT"
-          if [[ "$releases" == "[]" ]]; then
-            echo 'releases_created=false' >> "$GITHUB_OUTPUT"
+          if [[ -n "$RECOVERY_TAG" ]]; then
+            tag=$RECOVERY_TAG
           else
-            echo 'releases_created=true' >> "$GITHUB_OUTPUT"
+            output=$(mise exec -- release-plz release \
+              --git-token "$GH_TOKEN" \
+              --repo-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+              --output json)
+            tag=$(printf '%s' "$output" | mise exec -- yq -p=json -r '.releases[0].tag // ""')
+
+            if [[ -z "$tag" ]]; then
+              version=$(mise exec -- cargo metadata --no-deps --format-version 1 |
+                mise exec -- yq -p=json -r '.packages[] | select(.name == "herdr-worktree-gc") | .version')
+              tag="v$version"
+            fi
           fi
+
+          if release=$(mise exec -- gh release view "$tag" --json isDraft 2>/dev/null); then
+            if [[ "$(printf '%s' "$release" | mise exec -- yq -p=json -r '.isDraft')" != "true" ]]; then
+              echo "Release $tag is already published; nothing to build."
+              echo 'release_pending=false' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          elif git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            mise exec -- gh release create "$tag" --draft --generate-notes --verify-tag
+          elif [[ -n "$RECOVERY_TAG" ]]; then
+            echo "Recovery tag $tag does not exist." >&2
+            exit 1
+          else
+            echo 'No release is pending.'
+            echo 'release_pending=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+          echo 'release_pending=true' >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.target }}
     needs: release
-    if: needs.release.outputs.releases_created == 'true'
+    if: needs.release.outputs.release_pending == 'true'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
           - os: macos-15
             target: aarch64-apple-darwin
           - os: ubuntu-latest
@@ -68,7 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ fromJSON(needs.release.outputs.releases)[0].tag }}
+          ref: ${{ needs.release.outputs.tag }}
       - uses: jdx/mise-action@v3
         with:
           cache: true
@@ -84,7 +117,7 @@ jobs:
     needs:
       - release
       - build
-    if: needs.release.outputs.releases_created == 'true'
+    if: needs.release.outputs.release_pending == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -98,17 +131,24 @@ jobs:
           pattern: worktree-gc-*
           path: dist
           merge-multiple: true
-      - name: Upload archives to GitHub Release
+      - name: Upload archives to draft release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ fromJSON(needs.release.outputs.releases)[0].tag }}
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
         run: mise exec -- gh release upload "$RELEASE_TAG" dist/*.tar.gz --clobber
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
+        run: mise exec -- gh release edit "$RELEASE_TAG" --draft=false --latest
 
   release-pr:
     name: Prepare next release
     needs: release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       pull-requests: write
     concurrency:
@@ -159,3 +199,12 @@ jobs:
           git add herdr-plugin.toml
           git commit -m "chore: sync plugin manifest version"
           git push
+      - name: Run CI for release pull request
+        if: steps.release-pr.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_DATA: ${{ steps.release-pr.outputs.pr }}
+        run: |
+          pr_number=$(printf '%s' "$PR_DATA" | mise exec -- yq -p=json -r '.number')
+          head_ref=$(mise exec -- gh pr view "$pr_number" --json headRefName --jq '.headRefName')
+          mise exec -- gh workflow run ci.yml --ref "$head_ref"

@@ -30,7 +30,7 @@ Installed release archives contain a native binary; Python and a Rust toolchain 
 
 Precompiled release archives are produced for:
 
-- Apple Silicon and Intel macOS;
+- Apple Silicon macOS;
 - ARM64 and x86-64 Linux.
 
 ## Install a release
