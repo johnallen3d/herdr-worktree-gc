@@ -6,6 +6,15 @@ rust-version = "1.88"
 description = "Conservative cleanup of Herdr-managed Git worktrees"
 license = "MIT"
 publish = false
+include = [
+    "/src/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+    "/config.example.toml",
+    "/herdr-plugin.toml",
+]
 
 [lints.clippy]
 pedantic = { level = "deny", priority = -1 }

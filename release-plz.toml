@@ -1,0 +1,13 @@
+[workspace]
+git_only = true
+release_always = false
+git_release_enable = true
+git_release_draft = true
+git_release_latest = false
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+release_commits = '^(feat|fix|perf|revert)(\([^)]+\))?!?:'
+
+[[package]]
+name = "herdr-worktree-gc"
+changelog_path = "CHANGELOG.md"
