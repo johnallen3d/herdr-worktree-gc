@@ -15,6 +15,8 @@ use wait_timeout::ChildExt;
 const PLUGIN_ID: &str = "worktree-gc";
 const DEFAULT_DEBOUNCE_SECONDS: u64 = 300;
 const DEFAULT_FETCH_TIMEOUT_SECONDS: u64 = 60;
+const WORKSPACE_PUBLICATION_RETRIES: usize = 4;
+const WORKSPACE_PUBLICATION_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -62,6 +64,10 @@ trait Runner {
         timeout: Option<Duration>,
         extra_env: &[(&str, &str)],
     ) -> CommandResult;
+
+    fn sleep(&self, duration: Duration) {
+        thread::sleep(duration);
+    }
 }
 
 struct CommandRunner;
@@ -329,40 +335,8 @@ struct WorktreeGc<'a> {
 impl WorktreeGc<'_> {
     #[allow(clippy::too_many_lines)]
     fn run(&self, remove: bool, force_fetch: bool, event_json: &str, context_json: &str) -> i32 {
-        let workspace_result = self.command(&[&self.herdr_bin, "workspace", "list"]);
-        if workspace_result.returncode != 0 {
-            self.logger.emit(
-                "error",
-                "workspace-list-failed",
-                &json!({"error": message(&workspace_result)}),
-            );
+        let Ok((workspaces, panes)) = self.herdr_state(event_json) else {
             return 1;
-        }
-        let workspaces = match parse_workspaces(&workspace_result.stdout) {
-            Ok(value) => value,
-            Err(error) => {
-                self.logger
-                    .emit("error", "workspace-list-invalid", &json!({"error": error}));
-                return 1;
-            }
-        };
-
-        let pane_result = self.command(&[&self.herdr_bin, "pane", "list"]);
-        if pane_result.returncode != 0 {
-            self.logger.emit(
-                "error",
-                "pane-list-failed",
-                &json!({"error": message(&pane_result)}),
-            );
-            return 1;
-        }
-        let panes = match parse_panes(&pane_result.stdout) {
-            Ok(value) => value,
-            Err(error) => {
-                self.logger
-                    .emit("error", "pane-list-invalid", &json!({"error": error}));
-                return 1;
-            }
         };
 
         let mut repo_hints = event_repo_hints(event_json);
@@ -447,6 +421,66 @@ impl WorktreeGc<'_> {
             }),
         );
         0
+    }
+
+    fn herdr_state(&self, event_json: &str) -> Result<(Vec<Workspace>, Vec<Pane>), ()> {
+        let expected_workspace = created_workspace_id(event_json);
+        for attempt in 0..=WORKSPACE_PUBLICATION_RETRIES {
+            let workspaces = self.workspaces()?;
+            let panes = self.panes()?;
+            let workspace_published = expected_workspace.as_deref().is_none_or(|expected| {
+                workspaces.iter().any(|workspace| workspace.id == expected)
+                    && panes.iter().any(|pane| pane.workspace_id == expected)
+            });
+            if workspace_published {
+                return Ok((workspaces, panes));
+            }
+            if attempt == WORKSPACE_PUBLICATION_RETRIES {
+                self.logger.emit(
+                    "warning",
+                    "workspace-publication-timeout",
+                    &json!({
+                        "workspace": expected_workspace,
+                        "attempts": WORKSPACE_PUBLICATION_RETRIES + 1,
+                    }),
+                );
+                return Ok((workspaces, panes));
+            }
+            self.runner.sleep(WORKSPACE_PUBLICATION_RETRY_DELAY);
+        }
+        unreachable!()
+    }
+
+    fn workspaces(&self) -> Result<Vec<Workspace>, ()> {
+        let result = self.command(&[&self.herdr_bin, "workspace", "list"]);
+        if result.returncode != 0 {
+            self.logger.emit(
+                "error",
+                "workspace-list-failed",
+                &json!({"error": message(&result)}),
+            );
+            return Err(());
+        }
+        parse_workspaces(&result.stdout).map_err(|error| {
+            self.logger
+                .emit("error", "workspace-list-invalid", &json!({"error": error}));
+        })
+    }
+
+    fn panes(&self) -> Result<Vec<Pane>, ()> {
+        let result = self.command(&[&self.herdr_bin, "pane", "list"]);
+        if result.returncode != 0 {
+            self.logger.emit(
+                "error",
+                "pane-list-failed",
+                &json!({"error": message(&result)}),
+            );
+            return Err(());
+        }
+        parse_panes(&result.stdout).map_err(|error| {
+            self.logger
+                .emit("error", "pane-list-invalid", &json!({"error": error}));
+        })
     }
 
     fn command(&self, args: &[&str]) -> CommandResult {
@@ -992,6 +1026,20 @@ fn event_repo_hints(raw: &str) -> Vec<PathBuf> {
     hints
 }
 
+fn created_workspace_id(raw: &str) -> Option<String> {
+    let payload = serde_json::from_str::<Value>(raw).ok()?;
+    let is_created = payload.get("event").and_then(Value::as_str) == Some("workspace_created")
+        || payload.pointer("/data/type").and_then(Value::as_str) == Some("workspace_created");
+    is_created
+        .then(|| {
+            payload
+                .pointer("/data/workspace/workspace_id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .flatten()
+}
+
 fn protected_context_paths(event_json: &str, context_json: &str) -> Vec<PathBuf> {
     let is_workspace_closed = serde_json::from_str::<Value>(event_json).is_ok_and(|event| {
         event.get("event").and_then(Value::as_str) == Some("workspace_closed")
@@ -1244,6 +1292,7 @@ mod tests {
     struct RecordingRunner {
         responses: RefCell<Vec<CommandResult>>,
         calls: RefCell<Vec<Vec<String>>>,
+        sleeps: RefCell<Vec<Duration>>,
     }
 
     impl RecordingRunner {
@@ -1252,6 +1301,7 @@ mod tests {
             Self {
                 responses: RefCell::new(responses),
                 calls: RefCell::new(Vec::new()),
+                sleeps: RefCell::new(Vec::new()),
             }
         }
     }
@@ -1268,6 +1318,10 @@ mod tests {
                 .borrow_mut()
                 .pop()
                 .unwrap_or_else(|| panic!("unexpected command: {args:?}"))
+        }
+
+        fn sleep(&self, duration: Duration) {
+            self.sleeps.borrow_mut().push(duration);
         }
     }
 
@@ -1338,6 +1392,83 @@ mod tests {
             event_repo_hints(payload),
             vec![PathBuf::from("/repo"), PathBuf::from("/repo-feature")]
         );
+    }
+
+    #[test]
+    fn created_workspace_id_comes_from_creation_events_only() {
+        let created = r#"{"event":"workspace_created","data":{"type":"workspace_created","workspace":{"workspace_id":"w2"}}}"#;
+        assert_eq!(created_workspace_id(created).as_deref(), Some("w2"));
+        assert_eq!(
+            created_workspace_id(
+                r#"{"event":"workspace_focused","data":{"type":"workspace_focused","workspace_id":"w2"}}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn workspace_creation_retries_until_new_repository_is_published() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let old_workspaces = r#"{"result":{"workspaces":[{"workspace_id":"w1"}]}}"#;
+        let old_panes = r#"{"result":{"panes":[]}}"#;
+        let published_workspaces = json!({
+            "result": {
+                "workspaces": [{
+                    "workspace_id": "w2",
+                    "worktree": {
+                        "checkout_path": repo,
+                        "repo_root": repo,
+                    },
+                }],
+            },
+        })
+        .to_string();
+        let published_panes = json!({
+            "result": {
+                "panes": [{
+                    "pane_id": "w2:p1",
+                    "workspace_id": "w2",
+                    "cwd": repo,
+                }],
+            },
+        })
+        .to_string();
+        let worktrees = format!(
+            "worktree {}\0HEAD aaa\0branch refs/heads/main\0\0",
+            repo.display()
+        );
+        let runner = RecordingRunner::new(vec![
+            result(0, old_workspaces, ""),
+            result(0, old_panes, ""),
+            result(0, &published_workspaces, ""),
+            result(0, &published_panes, ""),
+            result(0, &worktrees, ""),
+            result(0, &format!("{}\n", repo.join(".git").display()), ""),
+            result(0, &worktrees, ""),
+            result(0, &format!("{}\n", repo.join(".git").display()), ""),
+            result(0, &worktrees, ""),
+            result(0, &format!("{}\n", repo.join(".git").display()), ""),
+            result(0, &format!("{}\n", repo.join(".git").display()), ""),
+            result(0, "", ""),
+            result(0, &worktrees, ""),
+        ]);
+        let logger = Logger::new("workspace.created");
+        let gc = collector(temp.path(), &runner, &logger);
+        let event = r#"{"event":"workspace_created","data":{"type":"workspace_created","workspace":{"workspace_id":"w2"}}}"#;
+
+        assert_eq!(gc.run(false, false, event, ""), 0);
+        assert_eq!(
+            runner.sleeps.borrow().as_slice(),
+            &[WORKSPACE_PUBLICATION_RETRY_DELAY]
+        );
+        let calls = runner.calls.borrow();
+        assert_eq!(calls[0], ["herdr-test", "workspace", "list"]);
+        assert_eq!(calls[1], ["herdr-test", "pane", "list"]);
+        assert_eq!(calls[2], ["herdr-test", "workspace", "list"]);
+        assert_eq!(calls[3], ["herdr-test", "pane", "list"]);
+        assert!(calls[4].contains(&repo.to_string_lossy().into_owned()));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 A conservative [Herdr](https://herdr.dev) plugin that discovers repositories from the live Herdr session and removes linked Git worktrees after their configured upstream branch disappears.
 
-The plugin reacts to Herdr startup and `workspace.created`, `workspace.focused`, and `workspace.closed`. Fetches are debounced per repository, and an inter-process lock prevents overlapping cleanup runs.
+The plugin reacts to Herdr startup and `workspace.created`, `workspace.focused`, and `workspace.closed`. Creation hooks briefly retry discovery until Herdr publishes the new workspace and root pane, while also using repository paths supplied by the event context. Fetches are debounced per repository, and an inter-process lock prevents overlapping cleanup runs.
 
 ## Safety model
 
