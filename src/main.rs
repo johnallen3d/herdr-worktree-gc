@@ -401,7 +401,8 @@ impl WorktreeGc<'_> {
                             "dry_run": true,
                         }),
                     );
-                } else if self.remove_worktree(repo_root, &worktree, &upstream) {
+                } else if self.remove_worktree(repo_root, &worktree, &upstream, &workspaces, &panes)
+                {
                     removed += 1;
                 }
             }
@@ -735,7 +736,14 @@ impl WorktreeGc<'_> {
         }
     }
 
-    fn remove_worktree(&self, repo_root: &Path, worktree: &Worktree, upstream: &str) -> bool {
+    fn remove_worktree(
+        &self,
+        repo_root: &Path,
+        worktree: &Worktree,
+        upstream: &str,
+        workspaces_before_removal: &[Workspace],
+        panes_before_removal: &[Pane],
+    ) -> bool {
         // Deliberately omit force/reap flags. Worktrunk remains the safety authority.
         let result = self.command_owned(&[
             self.wt_bin.clone(),
@@ -772,12 +780,21 @@ impl WorktreeGc<'_> {
                 "branch_outcome": worktrunk_outcome(&result.stdout),
             }),
         );
-        self.close_stale_ui(&worktree.path);
+        self.close_stale_ui(
+            &worktree.path,
+            workspaces_before_removal,
+            panes_before_removal,
+        );
         true
     }
 
     #[allow(clippy::too_many_lines)]
-    fn close_stale_ui(&self, path: &Path) {
+    fn close_stale_ui(
+        &self,
+        path: &Path,
+        workspaces_before_removal: &[Workspace],
+        panes_before_removal: &[Pane],
+    ) {
         let result = self.command(&[&self.herdr_bin, "workspace", "list"]);
         if result.returncode != 0 {
             self.logger.emit(
@@ -790,23 +807,77 @@ impl WorktreeGc<'_> {
         let Ok(workspaces) = parse_workspaces(&result.stdout) else {
             return;
         };
+        let pane_result = self.command(&[&self.herdr_bin, "pane", "list"]);
+        if pane_result.returncode != 0 {
+            self.logger.emit(
+                "warning",
+                "pane-refresh-failed",
+                &json!({"error": message(&pane_result)}),
+            );
+            return;
+        }
+        let Ok(panes) = parse_panes(&pane_result.stdout) else {
+            return;
+        };
+        let calling_pane = env::var("HERDR_PANE_ID").ok();
         let mut closed_workspaces = HashSet::new();
         for workspace in workspaces {
-            if !workspace
-                .checkout_path
-                .as_ref()
-                .is_some_and(|checkout| same_path(checkout, path))
-            {
+            // Herdr can drop worktree metadata as soon as wt removes the checkout.
+            // Keep the pre-removal workspace/pane association, but never close a
+            // workspace that has since been assigned another checkout.
+            let matches_path = |candidate: &PathBuf| same_path(candidate, path);
+            let was_here = workspaces_before_removal.iter().any(|before| {
+                before.id == workspace.id && before.checkout_path.as_ref().is_some_and(matches_path)
+            }) || panes_before_removal.iter().any(|pane| {
+                pane.workspace_id == workspace.id
+                    && [&pane.cwd, &pane.foreground_cwd]
+                        .into_iter()
+                        .flatten()
+                        .any(|candidate| is_under(&resolve_path(candidate), &resolve_path(path)))
+            });
+            if let Some(checkout) = &workspace.checkout_path {
+                if !same_path(checkout, path) {
+                    continue;
+                }
+            } else if !was_here {
                 continue;
             }
-            if workspace.has_agent {
+            let workspace_panes = panes
+                .iter()
+                .filter(|pane| pane.workspace_id == workspace.id);
+            let pane_moved = workspace_panes.clone().any(|pane| {
+                panes_before_removal.iter().any(|before| {
+                    before.id == pane.id
+                        && [&before.cwd, &before.foreground_cwd]
+                            .into_iter()
+                            .flatten()
+                            .any(|candidate| {
+                                is_under(&resolve_path(candidate), &resolve_path(path))
+                            })
+                }) && ![&pane.cwd, &pane.foreground_cwd]
+                    .into_iter()
+                    .flatten()
+                    .any(|candidate| is_under(&resolve_path(candidate), &resolve_path(path)))
+                    && (pane.cwd.is_some() || pane.foreground_cwd.is_some())
+            });
+            let reason = if pane_moved {
+                Some("pane-moved-during-cleanup")
+            } else if workspace.focused
+                || workspace_panes
+                    .clone()
+                    .any(|pane| pane.focused || calling_pane.as_deref() == Some(&pane.id))
+            {
+                Some("focused-during-cleanup")
+            } else if workspace.has_agent || workspace_panes.clone().any(|pane| pane.has_agent) {
+                Some("agent-appeared-during-cleanup")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
                 self.logger.emit(
                     "warning",
                     "workspace-close-skipped",
-                    &json!({
-                        "workspace": workspace.id,
-                        "reason": "agent-appeared-during-cleanup",
-                    }),
+                    &json!({"workspace": workspace.id, "reason": reason}),
                 );
                 continue;
             }
@@ -822,27 +893,11 @@ impl WorktreeGc<'_> {
                 self.logger.emit(
                     "warning",
                     "workspace-close-failed",
-                    &json!({
-                        "workspace": workspace.id,
-                        "error": message(&closed),
-                    }),
+                    &json!({"workspace": workspace.id, "error": message(&closed)}),
                 );
             }
         }
 
-        let pane_result = self.command(&[&self.herdr_bin, "pane", "list"]);
-        if pane_result.returncode != 0 {
-            self.logger.emit(
-                "warning",
-                "pane-refresh-failed",
-                &json!({"error": message(&pane_result)}),
-            );
-            return;
-        }
-        let Ok(panes) = parse_panes(&pane_result.stdout) else {
-            return;
-        };
-        let calling_pane = env::var("HERDR_PANE_ID").ok();
         for pane in panes {
             if closed_workspaces.contains(&pane.workspace_id)
                 || calling_pane.as_deref() == Some(&pane.id)
@@ -856,11 +911,11 @@ impl WorktreeGc<'_> {
             if !inside {
                 continue;
             }
-            if pane.has_agent {
+            if pane.focused || pane.has_agent {
                 self.logger.emit(
                     "warning",
                     "pane-close-skipped",
-                    &json!({"pane": pane.id, "reason": "agent-appeared-during-cleanup"}),
+                    &json!({"pane": pane.id, "reason": "active-during-cleanup"}),
                 );
                 continue;
             }
@@ -1598,7 +1653,13 @@ mod tests {
             detached: false,
             prunable: false,
         };
-        assert!(gc.remove_worktree(temp.path(), &worktree, "refs/remotes/origin/feature"));
+        assert!(gc.remove_worktree(
+            temp.path(),
+            &worktree,
+            "refs/remotes/origin/feature",
+            &[],
+            &[]
+        ));
         let calls = runner.calls.borrow();
         let command = &calls[0];
         assert_eq!(command[0], "wt");
@@ -1606,6 +1667,141 @@ mod tests {
         assert!(command.contains(&"--yes".into()));
         for forbidden in ["--force", "--force-delete", "-D", "--reap"] {
             assert!(!command.contains(&forbidden.into()));
+        }
+    }
+
+    #[test]
+    fn closes_workspace_when_removed_worktree_metadata_disappears() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("linked");
+        let before = Workspace {
+            id: "w1".into(),
+            checkout_path: Some(path.clone()),
+            repo_root: Some(temp.path().into()),
+            focused: false,
+            has_agent: false,
+        };
+        let runner = RecordingRunner::new(vec![
+            result(
+                0,
+                r#"{"result":{"workspaces":[{"workspace_id":"w1","worktree":null}]}}"#,
+                "",
+            ),
+            result(
+                0,
+                r#"{"result":{"panes":[{"pane_id":"w1:p1","workspace_id":"w1","cwd":"/tmp"}]}}"#,
+                "",
+            ),
+            result(0, "", ""),
+        ]);
+        let logger = Logger::new("test");
+        collector(temp.path(), &runner, &logger).close_stale_ui(&path, &[before], &[]);
+        assert_eq!(
+            runner.calls.borrow()[2],
+            ["herdr-test", "workspace", "close", "w1"]
+        );
+    }
+
+    #[test]
+    fn closes_workspace_identified_by_its_pane_when_worktree_metadata_is_missing() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("linked");
+        let before = Pane {
+            id: "w1:p1".into(),
+            workspace_id: "w1".into(),
+            cwd: Some(path.clone()),
+            foreground_cwd: None,
+            focused: false,
+            has_agent: false,
+        };
+        let runner = RecordingRunner::new(vec![
+            result(
+                0,
+                r#"{"result":{"workspaces":[{"workspace_id":"w1"}]}}"#,
+                "",
+            ),
+            result(
+                0,
+                r#"{"result":{"panes":[{"pane_id":"w1:p1","workspace_id":"w1"}]}}"#,
+                "",
+            ),
+            result(0, "", ""),
+        ]);
+        let logger = Logger::new("test");
+        collector(temp.path(), &runner, &logger).close_stale_ui(&path, &[], &[before]);
+        assert_eq!(
+            runner.calls.borrow()[2],
+            ["herdr-test", "workspace", "close", "w1"]
+        );
+    }
+
+    #[test]
+    fn does_not_close_workspace_when_its_pane_moved_after_removal() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("linked");
+        let before = Pane {
+            id: "w1:p1".into(),
+            workspace_id: "w1".into(),
+            cwd: Some(path.clone()),
+            foreground_cwd: None,
+            focused: false,
+            has_agent: false,
+        };
+        let runner = RecordingRunner::new(vec![
+            result(
+                0,
+                r#"{"result":{"workspaces":[{"workspace_id":"w1"}]}}"#,
+                "",
+            ),
+            result(
+                0,
+                r#"{"result":{"panes":[{"pane_id":"w1:p1","workspace_id":"w1","cwd":"/other"}]}}"#,
+                "",
+            ),
+        ]);
+        let logger = Logger::new("test");
+        collector(temp.path(), &runner, &logger).close_stale_ui(&path, &[], &[before]);
+        assert_eq!(runner.calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn does_not_close_repurposed_or_active_workspace_after_removal() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("linked");
+        let before = Workspace {
+            id: "w1".into(),
+            checkout_path: Some(path.clone()),
+            repo_root: None,
+            focused: false,
+            has_agent: false,
+        };
+        for (worktree, pane) in [
+            (
+                json!({"checkout_path": temp.path().join("other")}),
+                json!({"result": {"panes": []}}),
+            ),
+            (
+                Value::Null,
+                json!({"result": {"panes": [{"pane_id":"w1:p1","workspace_id":"w1","focused":true}]}}),
+            ),
+            (
+                Value::Null,
+                json!({"result": {"panes": [{"pane_id":"w1:p1","workspace_id":"w1","agent":"pi"}]}}),
+            ),
+        ] {
+            let workspaces =
+                json!({"result": {"workspaces": [{"workspace_id": "w1", "worktree": worktree}]}});
+            let runner = RecordingRunner::new(vec![
+                result(0, &workspaces.to_string(), ""),
+                result(0, &pane.to_string(), ""),
+            ]);
+            let logger = Logger::new("test");
+            collector(temp.path(), &runner, &logger).close_stale_ui(
+                &path,
+                std::slice::from_ref(&before),
+                &[],
+            );
+            assert_eq!(runner.calls.borrow().len(), 2);
         }
     }
 
