@@ -18,6 +18,7 @@ Worktree GC:
 - delegates removal to `wt remove --foreground` so Worktrunk checks dirty worktrees and branch integration;
 - never passes Worktrunk's `--force`, `--force-delete`, or `--reap` flags;
 - closes stale Herdr workspaces or legacy panes after successful removal;
+- on later runs, can also close unfocused, agent-free linked-worktree workspaces whose checkout is gone and no longer registered with Git, after checking that their panes remain at the removed checkout or its Worktrunk trash location;
 - logs every fetch, candidate, skip, refusal, and removal through Herdr's plugin log.
 
 Automatic event handling is **preview-only by default**. Enable removal only after reviewing the preview output.
@@ -77,6 +78,8 @@ Run one explicit cleanup pass:
 ```sh
 herdr plugin action invoke worktree-gc.cleanup
 ```
+
+The preview also reports `stale-workspace-candidate` entries for workspaces left behind by earlier worktree removals. Cleanup rechecks their Git registration and Herdr focus, agent, checkout, and pane state before closing them. Herdr sessions are separate: invoke the action in the session containing the sidebar items (for example, `herdr --session work plugin action invoke worktree-gc.preview`).
 
 Inspect decisions and failures:
 
