@@ -104,7 +104,7 @@ Available settings:
 auto_remove = false
 
 # Minimum time between successful fetches of the same repository.
-debounce_seconds = 300
+debounce_seconds = 60
 
 # Abort a repository pass if fetch takes longer than this.
 fetch_timeout_seconds = 60

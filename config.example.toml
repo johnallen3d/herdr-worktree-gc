@@ -2,7 +2,7 @@
 auto_remove = false
 
 # Avoid repeated network work during bursts of workspace events.
-debounce_seconds = 300
+debounce_seconds = 60
 fetch_timeout_seconds = 60
 
 # Fail closed when process detection is unavailable.

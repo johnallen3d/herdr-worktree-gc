@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use wait_timeout::ChildExt;
 
 const PLUGIN_ID: &str = "worktree-gc";
-const DEFAULT_DEBOUNCE_SECONDS: u64 = 300;
+const DEFAULT_DEBOUNCE_SECONDS: u64 = 60;
 const DEFAULT_FETCH_TIMEOUT_SECONDS: u64 = 60;
 const WORKSPACE_PUBLICATION_RETRIES: usize = 4;
 const WORKSPACE_PUBLICATION_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -1713,7 +1713,9 @@ mod tests {
     #[test]
     fn config_defaults_to_preview_and_validates_types() {
         let temp = TempDir::new().unwrap();
-        assert_eq!(Config::load(temp.path()).unwrap(), Config::default());
+        let defaults = Config::load(temp.path()).unwrap();
+        assert_eq!(defaults, Config::default());
+        assert_eq!(defaults.debounce_seconds, 60);
         fs::write(
             temp.path().join("config.toml"),
             "auto_remove = true\ndebounce_seconds = 12\nfetch_timeout_seconds = 4\n",
