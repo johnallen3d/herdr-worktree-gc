@@ -11,11 +11,9 @@ command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/worktree-gc\" event --tr
 [[events]]
 on = "workspace.created"
 command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/worktree-gc\" event --trigger workspace.created"]
-
 [[events]]
 on = "workspace.focused"
 command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/worktree-gc\" event --trigger workspace.focused"]
-
 [[events]]
 on = "workspace.closed"
 command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/worktree-gc\" event --trigger workspace.closed"]
@@ -25,7 +23,6 @@ id = "preview"
 title = "Worktree GC: preview"
 contexts = ["global", "workspace"]
 command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/worktree-gc\" run --dry-run --force-fetch --trigger preview"]
-
 [[actions]]
 id = "cleanup"
 title = "Worktree GC: clean up now"
